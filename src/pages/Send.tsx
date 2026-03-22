@@ -30,6 +30,39 @@ export function Send() {
         setPeerConnected(true);
         setStatus('connected');
         toast.success('Receiver connected!');
+        
+        // Setup message listener for the data channel
+        if (peer.dataChannel) {
+          peer.dataChannel.onmessage = (event) => {
+            if (typeof event.data === 'string') {
+              try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'cancel') {
+                  const sender = sendersRef.current.get(data.fileId);
+                  if (sender) {
+                    sender.cancel();
+                    sendersRef.current.delete(data.fileId);
+                  }
+                  setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'cancelled' } : f));
+                } else if (data.type === 'pause') {
+                  const sender = sendersRef.current.get(data.fileId);
+                  if (sender) {
+                    sender.pause();
+                    setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'paused', speed: 0 } : f));
+                  }
+                } else if (data.type === 'resume') {
+                  const sender = sendersRef.current.get(data.fileId);
+                  if (sender) {
+                    sender.resume();
+                    setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'transferring' } : f));
+                  }
+                }
+              } catch (e) {
+                console.error("Error parsing message", e);
+              }
+            }
+          };
+        }
       } else if (state === 'disconnected' || state === 'failed') {
         setPeerConnected(false);
         setStatus('error');
