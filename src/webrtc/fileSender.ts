@@ -2,7 +2,7 @@ export class FileSender {
   private channel: RTCDataChannel;
   private file: File;
   public fileId: number;
-  private chunkSize = 256 * 1024; // 256KB
+  private chunkSize = 64 * 1024; // 64KB
   private offset = 0;
   private fileReader = new FileReader();
   private isCancelled = false;
@@ -24,7 +24,10 @@ export class FileSender {
     this.fileId = fileId;
 
     this.fileReader.onerror = () => {
-      if (!this.isCancelled) this.onError?.(new Error("Error reading file"));
+      if (!this.isCancelled) {
+        this.onError?.(new Error("Error reading file"));
+        this.cancel();
+      }
     };
 
     this.fileReader.onload = (e) => {
@@ -49,7 +52,7 @@ export class FileSender {
   }
 
   public start() {
-    this.channel.bufferedAmountLowThreshold = 1024 * 1024; // 1MB
+    this.channel.bufferedAmountLowThreshold = 128 * 1024; // 128KB
     
     // Send metadata first
     const metadata = {
@@ -68,7 +71,7 @@ export class FileSender {
     // Wait for receiver to acknowledge metadata before sending chunks
     setTimeout(() => {
       if (!this.isCancelled && !this.isPaused) this.readNextChunk();
-    }, 50);
+    }, 100);
   }
 
   public pause() {
