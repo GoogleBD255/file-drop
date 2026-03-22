@@ -17,6 +17,8 @@ export class FileReceiver {
   private writeQueue: ArrayBuffer[] = [];
   private isWriting = false;
   private isFinished = false;
+  private isCancelled = false;
+  private isInitializing = true;
 
   constructor(metadata: any) {
     this.metadata = metadata;
@@ -28,18 +30,39 @@ export class FileReceiver {
   private async initStorage() {
     try {
       const root = await navigator.storage.getDirectory();
-      this.fileHandle = await root.getFileHandle(`transfer_${Date.now()}_${this.metadata.name}`, { create: true });
+      // Sanitize filename to avoid issues with special characters
+      const safeName = this.metadata.name.replace(/[^a-z0-9._-]/gi, '_');
+      this.fileHandle = await root.getFileHandle(`transfer_${Date.now()}_${safeName}`, { create: true });
       this.writable = await (this.fileHandle as any).createWritable();
       this.useOPFS = true;
     } catch (e) {
       console.warn("OPFS not available, falling back to memory", e);
       this.useOPFS = false;
+    } finally {
+      this.isInitializing = false;
+      // Process any chunks that arrived during initialization
+      if (this.useOPFS) {
+        this.processWriteQueue();
+      } else {
+        // Move everything from writeQueue to fallbackBuffers
+        this.fallbackBuffers.push(...this.writeQueue);
+        this.writeQueue = [];
+        if (this.isFinished) {
+          this.finalize();
+        }
+      }
     }
   }
 
   public receiveChunk(chunk: ArrayBuffer) {
+    if (this.isCancelled) return;
     this.receivedSize += chunk.byteLength;
     this.reportProgress();
+
+    if (this.isInitializing) {
+      this.writeQueue.push(chunk);
+      return;
+    }
 
     if (this.useOPFS) {
       this.writeQueue.push(chunk);
@@ -49,11 +72,20 @@ export class FileReceiver {
     }
   }
 
+  public cancel() {
+    this.isCancelled = true;
+    this.writeQueue = [];
+    this.fallbackBuffers = [];
+    if (this.writable) {
+      this.writable.close().catch(() => {});
+    }
+  }
+
   private async processWriteQueue() {
-    if (this.isWriting || !this.writable) return;
+    if (this.isWriting || !this.writable || this.isInitializing || this.isCancelled) return;
     this.isWriting = true;
     
-    while (this.writeQueue.length > 0) {
+    while (this.writeQueue.length > 0 && !this.isCancelled) {
       const chunk = this.writeQueue.shift();
       if (chunk) {
         try {
@@ -66,6 +98,8 @@ export class FileReceiver {
     
     this.isWriting = false;
     
+    if (this.isCancelled) return;
+
     if (this.isFinished && this.writeQueue.length === 0) {
       this.finalize();
     }
