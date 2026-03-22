@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { PeerConnection } from '../webrtc/peer';
 import { FileReceiver } from '../webrtc/fileReceiver';
 import { FileQueue, FileQueueItem } from '../components/FileQueue';
-import { Download, AlertCircle, Camera, Image as ImageIcon, Upload, Link as LinkIcon } from 'lucide-react';
+import { Download, AlertCircle, Camera, Image as ImageIcon, Upload, Link as LinkIcon, RefreshCw } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { toast } from 'react-hot-toast';
 
@@ -15,6 +15,10 @@ export function Receive() {
   const [files, setFiles] = useState<FileQueueItem[]>([]);
   const [status, setStatus] = useState<'scanning' | 'connecting' | 'connected' | 'error'>('connecting');
   const [scanMethod, setScanMethod] = useState<'camera' | 'file'>('camera');
+  const [cameraStarted, setCameraStarted] = useState(true);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [cameras, setCameras] = useState<any[]>([]);
+  const [currentCameraIndex, setCurrentCameraIndex] = useState(0);
   const [manualLink, setManualLink] = useState('');
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -47,50 +51,58 @@ export function Receive() {
     peer.onDataChannel = (channel) => {
       channel.onmessage = (event) => {
         if (typeof event.data === 'string') {
-          const data = JSON.parse(event.data);
-          if (data.type === 'metadata') {
-            const receiver = new FileReceiver(data);
-            
-            receiver.onProgress = (p, s) => {
-              setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, progress: p, speed: s } : f));
-            };
-            
-            receiver.onComplete = (file) => {
-              const url = URL.createObjectURL(file);
-              setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'completed', progress: 100, speed: 0, url } : f));
-              receiversRef.current.delete(data.fileId);
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'metadata') {
+              const receiver = new FileReceiver(data);
               
-              toast.success(`File received: ${file.name}`);
+              receiver.onProgress = (p, s) => {
+                setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, progress: p, speed: s } : f));
+              };
               
-              // Auto download
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = file.name;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-            };
+              receiver.onComplete = (file) => {
+                const url = URL.createObjectURL(file);
+                setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'completed', progress: 100, speed: 0, url } : f));
+                receiversRef.current.delete(data.fileId);
+                
+                toast.success(`File received: ${file.name}`);
+                
+                // Auto download
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = file.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              };
 
-            receiversRef.current.set(data.fileId, receiver);
-            
-            setFiles(prev => [...prev, {
-              id: data.fileId,
-              name: data.name,
-              size: data.size,
-              type: data.fileType,
-              progress: 0,
-              speed: 0,
-              status: 'transferring'
-            }]);
-          } else if (data.type === 'complete') {
-            receiversRef.current.get(data.fileId)?.finish();
-          } else if (data.type === 'cancel') {
-            receiversRef.current.delete(data.fileId);
-            setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'cancelled' } : f));
-          } else if (data.type === 'pause') {
-            setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'paused', speed: 0 } : f));
-          } else if (data.type === 'resume') {
-            setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'transferring' } : f));
+              receiversRef.current.set(data.fileId, receiver);
+              
+              setFiles(prev => [...prev, {
+                id: data.fileId,
+                name: data.name,
+                size: data.size,
+                type: data.fileType,
+                progress: 0,
+                speed: 0,
+                status: 'transferring'
+              }]);
+            } else if (data.type === 'complete') {
+              receiversRef.current.get(data.fileId)?.finish();
+            } else if (data.type === 'cancel') {
+              const receiver = receiversRef.current.get(data.fileId);
+              if (receiver) {
+                receiver.cancel();
+                receiversRef.current.delete(data.fileId);
+              }
+              setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'cancelled' } : f));
+            } else if (data.type === 'pause') {
+              setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'paused', speed: 0 } : f));
+            } else if (data.type === 'resume') {
+              setFiles(prev => prev.map(f => f.id === data.fileId ? { ...f, status: 'transferring' } : f));
+            }
+          } catch (e) {
+            console.error("Error parsing message", e);
           }
         } else if (event.data instanceof ArrayBuffer) {
           const view = new DataView(event.data);
@@ -176,13 +188,40 @@ export function Receive() {
   };
 
   useEffect(() => {
+    Html5Qrcode.getCameras().then(devices => {
+      if (devices && devices.length > 1) {
+        setCameras(devices);
+      }
+    }).catch(err => {
+      console.error("Error getting cameras", err);
+    });
+  }, []);
+
+  useEffect(() => {
     if (status === 'scanning' && scanMethod === 'camera') {
+      setCameraStarted(true);
+    }
+  }, [status, scanMethod]);
+
+  useEffect(() => {
+    if (status === 'scanning' && scanMethod === 'camera' && cameraStarted) {
       const html5QrCode = new Html5Qrcode("reader");
       html5QrCodeRef.current = html5QrCode;
       
+      const cameraConfig = cameras.length > 0 
+        ? { deviceId: cameras[currentCameraIndex].id }
+        : { facingMode: "environment" };
+
       html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        cameraConfig,
+        { 
+          fps: 10, 
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const qrboxSize = Math.floor(minEdge * 0.7);
+            return { width: qrboxSize, height: qrboxSize };
+          }
+        },
         (decodedText) => {
           if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
             html5QrCodeRef.current.stop().catch(console.error);
@@ -192,9 +231,18 @@ export function Receive() {
         (errorMessage) => {
           // ignore errors during scanning
         }
-      ).catch(err => {
+      ).then(() => {
+        setPermissionDenied(false);
+      }).catch(err => {
         console.error("Error starting camera", err);
-        toast.error("Could not access camera. Please check permissions.");
+        const errorMsg = err.toString().toLowerCase();
+        if (errorMsg.includes("notallowederror") || errorMsg.includes("permission denied")) {
+          setPermissionDenied(true);
+          toast.error("Camera permission was denied. Please reset it in your browser settings.");
+        } else {
+          toast.error("Could not access camera. Please check permissions.");
+        }
+        setCameraStarted(false);
       });
 
       return () => {
@@ -205,7 +253,13 @@ export function Receive() {
         }
       };
     }
-  }, [status, scanMethod, navigate]);
+  }, [status, scanMethod, cameraStarted, currentCameraIndex, cameras, navigate]);
+
+  const switchCamera = () => {
+    if (cameras.length > 1) {
+      setCurrentCameraIndex((prev) => (prev + 1) % cameras.length);
+    }
+  };
 
   return (
     <div className="max-w-2xl mx-auto p-6">
@@ -216,91 +270,156 @@ export function Receive() {
 
       <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 p-8">
         {status === 'scanning' && (
-          <div className="flex flex-col items-center justify-center space-y-6">
-            <h2 className="text-xl font-medium">Scan QR Code</h2>
-            
-            <div className="flex bg-gray-100 dark:bg-gray-700/50 p-1 rounded-xl w-full max-w-sm">
-              <button
-                onClick={() => setScanMethod('camera')}
-                className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  scanMethod === 'camera' 
-                    ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm' 
-                    : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                }`}
-              >
-                <Camera className="w-4 h-4" />
-                <span>Camera</span>
-              </button>
-              <button
-                onClick={() => setScanMethod('file')}
-                className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  scanMethod === 'file' 
-                    ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm' 
-                    : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                }`}
-              >
-                <ImageIcon className="w-4 h-4" />
-                <span>Upload</span>
-              </button>
+          <div className="flex flex-col items-center justify-center space-y-8">
+            <div className="text-center">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Scan QR Code</h2>
+              <p className="text-gray-500 dark:text-gray-400">Point your camera at the sender's screen</p>
             </div>
-
-            {scanMethod === 'camera' ? (
-              <div className="w-full max-w-sm">
-                <div id="reader" className="mx-auto w-full overflow-hidden rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/50 aspect-square flex items-center justify-center"></div>
-                <p className="mt-4 text-center text-sm text-gray-500">Point your camera at the sender's QR code</p>
-              </div>
-            ) : (
-              <div className="w-full max-w-sm">
+            
+            <div className="w-full max-w-md relative">
+              {scanMethod === 'camera' ? (
+                <div className="relative group">
+                  <div id="reader" className="mx-auto w-full overflow-hidden rounded-3xl border-4 border-blue-500/20 dark:border-blue-400/20 bg-black aspect-square shadow-2xl relative z-0 flex items-center justify-center">
+                    {!cameraStarted && (
+                      <div className="z-20 flex flex-col items-center justify-center space-y-6 p-8 text-center">
+                        {permissionDenied ? (
+                          <div className="space-y-4">
+                            <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto">
+                              <Camera className="w-8 h-8 text-red-500" />
+                            </div>
+                            <div className="space-y-2">
+                              <p className="text-white font-bold text-lg">Permission Blocked</p>
+                              <p className="text-white/60 text-sm max-w-[240px] mx-auto">
+                                Tap the lock icon, "AA", or three dots in your address bar and reset camera permissions in Site Settings to continue.
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setPermissionDenied(false);
+                                setCameraStarted(true);
+                              }}
+                              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-base font-bold transition-all shadow-lg shadow-blue-500/30 flex items-center space-x-2 mx-auto"
+                            >
+                              <RefreshCw className="w-5 h-5" />
+                              <span>Reset & Try Again</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setCameraStarted(true)}
+                            className="flex flex-col items-center justify-center space-y-4 group"
+                          >
+                            <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-500/40 group-hover:scale-110 transition-transform">
+                              <Camera className="w-8 h-8 text-white" />
+                            </div>
+                            <div className="text-center">
+                              <p className="text-white font-bold text-lg">Enable Camera</p>
+                              <p className="text-white/60 text-sm">Tap to start scanning</p>
+                            </div>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Scanner Overlay UI */}
+                  {cameraStarted && (
+                    <>
+                      <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
+                        <div className="w-64 h-64 border-2 border-blue-500 rounded-3xl opacity-50 animate-pulse"></div>
+                        <div className="absolute top-0 left-0 w-full h-1 bg-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.5)] animate-scan"></div>
+                      </div>
+                      
+                      {cameras.length > 1 && (
+                        <button
+                          onClick={switchCamera}
+                          className="absolute bottom-6 right-6 z-20 p-3 bg-black/50 backdrop-blur-md border border-white/20 rounded-full text-white hover:bg-black/70 transition-all shadow-lg"
+                        >
+                          <RefreshCw className="w-6 h-6" />
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : (
                 <div 
                   onClick={() => fileInputRef.current?.click()}
-                  className="cursor-pointer mx-auto w-full overflow-hidden rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/50 aspect-square flex flex-col items-center justify-center hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-colors"
+                  className="cursor-pointer mx-auto w-full overflow-hidden rounded-3xl border-4 border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/50 aspect-square flex flex-col items-center justify-center hover:bg-gray-100 dark:hover:bg-gray-700/50 transition-all shadow-xl"
                 >
-                  <Upload className="w-12 h-12 text-gray-400 mb-4" />
-                  <p className="text-sm font-medium text-gray-900 dark:text-white">Click to upload QR code</p>
-                  <p className="text-xs text-gray-500 mt-1">PNG, JPG or WEBP</p>
+                  <Upload className="w-16 h-16 text-gray-400 mb-4" />
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">Upload QR Code</p>
+                  <p className="text-sm text-gray-500 mt-2">Tap to select an image</p>
                 </div>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  className="hidden" 
-                  accept="image/*" 
-                  onChange={handleFileUpload}
-                />
-                <div id="reader-hidden" className="hidden"></div>
-              </div>
-            )}
-
-            <div className="w-full max-w-sm flex items-center py-2">
-              <div className="flex-grow border-t border-gray-200 dark:border-gray-700"></div>
-              <span className="flex-shrink-0 mx-4 text-sm text-gray-400 font-medium uppercase tracking-wider">Or</span>
-              <div className="flex-grow border-t border-gray-200 dark:border-gray-700"></div>
+              )}
             </div>
 
-            <form onSubmit={handleManualSubmit} className="w-full max-w-sm">
-              <label htmlFor="link-input" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Enter Link or Room ID
-              </label>
-              <div className="relative flex items-center">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <LinkIcon className="h-5 w-5 text-gray-400" />
-                </div>
-                <input
-                  type="text"
-                  id="link-input"
-                  value={manualLink}
-                  onChange={(e) => setManualLink(e.target.value)}
-                  className="block w-full pl-10 pr-24 py-3 border border-gray-300 dark:border-gray-600 rounded-xl leading-5 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:text-sm transition-colors"
-                  placeholder="e.g. https://... or ID"
-                />
+            <div className="flex flex-col w-full max-w-md space-y-6">
+              <div className="flex bg-gray-100 dark:bg-gray-700/50 p-1.5 rounded-2xl">
                 <button
-                  type="submit"
-                  disabled={!manualLink.trim()}
-                  className="absolute right-1.5 top-1.5 bottom-1.5 px-4 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 text-white text-sm font-medium rounded-lg transition-colors"
+                  onClick={() => setScanMethod('camera')}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-semibold transition-all ${
+                    scanMethod === 'camera' 
+                      ? 'bg-white dark:bg-gray-600 text-blue-600 dark:text-blue-400 shadow-sm' 
+                      : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                  }`}
                 >
-                  Connect
+                  <Camera className="w-5 h-5" />
+                  <span>Use Camera</span>
+                </button>
+                <button
+                  onClick={() => setScanMethod('file')}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-semibold transition-all ${
+                    scanMethod === 'file' 
+                      ? 'bg-white dark:bg-gray-600 text-blue-600 dark:text-blue-400 shadow-sm' 
+                      : 'text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                  }`}
+                >
+                  <ImageIcon className="w-5 h-5" />
+                  <span>Upload Image</span>
                 </button>
               </div>
-            </form>
+
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                  <div className="w-full border-t border-gray-200 dark:border-gray-700"></div>
+                </div>
+                <div className="relative flex justify-center">
+                  <span className="px-3 bg-white dark:bg-gray-800 text-sm font-medium text-gray-400 uppercase tracking-widest">Or enter manually</span>
+                </div>
+              </div>
+
+              <form onSubmit={handleManualSubmit} className="space-y-3">
+                <div className="relative flex items-center">
+                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                    <LinkIcon className="h-5 w-5 text-gray-400" />
+                  </div>
+                  <input
+                    type="text"
+                    id="link-input"
+                    value={manualLink}
+                    onChange={(e) => setManualLink(e.target.value)}
+                    className="block w-full pl-12 pr-28 py-4 border-2 border-gray-100 dark:border-gray-700 rounded-2xl leading-5 bg-gray-50 dark:bg-gray-900/50 text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent sm:text-sm transition-all"
+                    placeholder="Paste link or Room ID"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!manualLink.trim()}
+                    className="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 text-white text-sm font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20"
+                  >
+                    Connect
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept="image/*" 
+              onChange={handleFileUpload}
+            />
+            <div id="reader-hidden" className="hidden"></div>
           </div>
         )}
 
@@ -345,3 +464,4 @@ export function Receive() {
     </div>
   );
 }
+
